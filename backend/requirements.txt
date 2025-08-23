@@ -1,0 +1,12 @@
+# CORE AI & PARSING - These are the absolute essentials to start.
+--index-url https://download.pytorch.org/whl/cpu
+torch
+transformers
+accelerate
+sentencepiece
+tokenizers
+tree-sitter
+
+# UTILITIES
+requests
+python-dotenv
