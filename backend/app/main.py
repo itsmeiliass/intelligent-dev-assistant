@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 
 # Import routers we will create in the next steps
-from app.routers import github, analysis, docs, tests
+from app.routers import github, analysis, docs, tests , refactor
 
 # Initialize the FastAPI application
 app = FastAPI(
@@ -37,6 +37,7 @@ app.include_router(github.router, prefix="/api/github", tags=["GitHub"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["Analysis"])
 app.include_router(docs.router, prefix="/api/docs", tags=["Documentation"])
 app.include_router(tests.router, prefix="/api/tests", tags=["Tests"])
+app.include_router(refactor.router, prefix="/api/refactor", tags=["Refactoring"]) 
 
 # This block allows us to run the app with `python -m uvicorn app.main:app --reload`
 if __name__ == "__main__":
