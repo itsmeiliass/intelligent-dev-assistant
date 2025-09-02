@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 class AIService:
     def __init__(self):
         self.use_ai = False
-        self.api_token = os.getenv("HF_API_TOKEN", "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")
+        self.api_token = os.getenv("HF_API_TOKEN", "")
         self.model_id = "itsmeiliass/ida-starcoder2-qlora"
         self.setup_api()
     
