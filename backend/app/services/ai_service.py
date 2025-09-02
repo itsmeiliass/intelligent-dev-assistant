@@ -1,246 +1,259 @@
 # app/services/ai_service.py
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import PeftModel, PeftConfig
-import torch
-import re
-from typing import Any
+import requests
 import os
+from typing import Optional
+import logging
+import time
+
+logger = logging.getLogger(__name__)
 
 class AIService:
     def __init__(self):
-        self.setup_models()
+        self.use_ai = False
+        self.api_token = os.getenv("HF_API_TOKEN", "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")
+        self.model_id = "itsmeiliass/ida-starcoder2-qlora"
+        self.setup_api()
     
-    def setup_models(self):
-        """
-        Charge StarCoder2 + LoRA fine-tunés.
-        Si échec -> fallback rule-based.
-        """
+    def setup_api(self):
+        """Setup Hugging Face API connection"""
         try:
-            print("🚀 Loading our FINE-TUNED StarCoder2 model...")
-            self.base_model_id = "bigcode/starcoder2-3b"
-            self.adapter_repo = "itsmeiliass/ida-starcoder2-qlora"
+            print("🚀 Connecting to Hugging Face API...")
+            print(f"Using model: {self.model_id}")
+            print(f"Token set: {self.api_token != 'your_huggingface_token_here'}")
             
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.base_model_id, 
-                use_fast=True
-            )
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-
-            base_model = AutoModelForCausalLM.from_pretrained(
-                self.base_model_id,
-                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto"
+            # Test the API connection with a known public model
+            test_model = "bigcode/starcoder2-3b"
+            response = requests.get(
+                f"https://huggingface.co/api/models/{test_model}",
+                headers={"Authorization": f"Bearer {self.api_token}"} if self.api_token != "your_huggingface_token_here" else {},
+                timeout=10
             )
             
-            # Chargez VOS adapteurs fine-tunés
-            self.model = PeftModel.from_pretrained(base_model, self.adapter_repo)
-            self.model.eval()
-
-            print("✅ Our fine-tuned model loaded successfully!")
-            
+            if response.status_code == 200:
+                print("✅ Basic API connection works!")
+                response2 = requests.get(
+                    f"https://huggingface.co/api/models/{self.model_id}",
+                    headers={"Authorization": f"Bearer {self.api_token}"} if self.api_token != "your_huggingface_token_here" else {},
+                    timeout=10
+                )
+                
+                if response2.status_code == 200:
+                    self.use_ai = True
+                    print("✅ Connected to our fine-tuned model successfully!")
+                else:
+                    print(f"❌ Our model access failed: {response2.status_code}")
+                    print("🔄 Falling back to base model...")
+                    self.model_id = "bigcode/starcoder2-3b"
+                    self.use_ai = True
+            else:
+                print(f"❌ Basic API test failed: {response.status_code}")
+                print("📋 Will use rule-based system")
+                self.use_ai = False
+                
         except Exception as e:
-            print(f"❌ Failed to load fine-tuned model: {e}")
-            print("📋 Falling back to enhanced rule-based system")
-            self.model = None
-            self.tokenizer = None
+            print(f"❌ API setup failed: {e}")
+            print("📋 Will use rule-based system")
+            self.use_ai = False
 
-    # -------------------- LAYER 1: FINE-TUNED MODEL INFERENCE --------------------
-    def _generate_with_fine_tuned_ai(self, function_code: str, function_name: str, mode: str = "doc") -> str:
-        """
-        Génère une docstring ou un test avec le modèle fine-tuné.
-        mode: "doc" -> docstring, "test" -> test
-        """
-        if self.model is None or self.tokenizer is None:
+    def _generate_with_api(self, function_code: str, mode: str = "doc") -> Optional[str]:
+        """Generate using Hugging Face Inference API"""
+        if not self.use_ai:
+            print("❌ AI not enabled")
             return None
         
-        if mode == "doc":
-            prompt = (
-                "### Task: Write a comprehensive Google-style Python docstring for the function below.\n"
-                f"### Code:\n{function_code}\n\n"
-                "### Response (docstring only, Google format with Args and Returns sections):\n"
-            )
-        else:
-            prompt = (
-                "### Task: Write minimal pytest unit tests for the function below.\n"
-                f"### Code:\n{function_code}\n\n"
-                "### Response (pytest code only):\n"
-            )
-
         try:
-            inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-            device = next(self.model.parameters()).device
-            inputs = {k: v.to(device) for k, v in inputs.items()}
+            prompt = (
+                "### Task: Write a Python docstring for the function below.\n" if mode == "doc"
+                else "### Task: Write a minimal pytest unit test for the function below.\n"
+            ) + f"### Code:\n{function_code}\n\n### Response ({'docstring only' if mode == 'doc' else 'pytest code only'}):\n"
+
+            print(f"📨 Sending request to: {self.model_id}")
             
-            with torch.inference_mode():
-                out = self.model.generate(
-                    **inputs,
-                    max_new_tokens=300,
-                    do_sample=True,
-                    temperature=0.3,
-                    top_p=0.9,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                    pad_token_id=self.tokenizer.eos_token_id
-                )
+            api_url = f"https://api-inference.huggingface.co/models/{self.model_id}"
+            headers = {
+                "Authorization": f"Bearer {self.api_token}" if self.api_token != "your_huggingface_token_here" else "",
+                "Content-Type": "application/json"
+            }
+            headers = {k: v for k, v in headers.items() if v}  # remove empty headers
             
-            text = self.tokenizer.decode(out[0], skip_special_tokens=True)
-            completion = text[len(prompt):].strip()
+            payload = {
+                "inputs": prompt,
+                "parameters": {
+                    "max_new_tokens": 200,
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "do_sample": True,
+                    "return_full_text": False
+                }
+            }
             
-            # Nettoyer la sortie
-            if mode == "doc":
-                if '"""' in completion:
-                    completion = completion.split('"""')[0]
-                completion = completion.strip()
-            
-            return completion
-            
-        except Exception as e:
-            print(f"🤖 Fine-tuned model generation failed: {e}")
+            max_retries = 3
+            for attempt in range(max_retries):
+                print(f"🔄 Attempt {attempt + 1}/{max_retries}")
+                try:
+                    response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+                    print(f"📥 Response status: {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        if isinstance(result, list) and len(result) > 0:
+                            return result[0].get('generated_text', '').strip()
+                        else:
+                            print("❌ Unexpected response format", result)
+                    
+                    elif response.status_code in [401, 403]:
+                        print(f"🔐 Authentication error: {response.status_code}, retrying without token...")
+                        response = requests.post(api_url, headers={"Content-Type": "application/json"}, json=payload, timeout=30)
+                        if response.status_code == 200:
+                            result = response.json()
+                            if isinstance(result, list) and len(result) > 0:
+                                return result[0].get('generated_text', '').strip()
+                    
+                    elif response.status_code == 404:
+                        print(f"❌ Model not found: {self.model_id}")
+                        if self.model_id != "bigcode/starcoder2-3b":
+                            print("🔄 Falling back to base model...")
+                            self.model_id = "bigcode/starcoder2-3b"
+                            continue  # retry once with base model
+                        else:
+                            print("❌ Base model not found, using rule-based fallback.")
+                            return None
+                    
+                    elif response.status_code == 503 and attempt < max_retries - 1:
+                        wait_time = 5 * (attempt + 1)
+                        print(f"⏳ Model loading, retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+
+                except requests.exceptions.Timeout:
+                    print("❌ API request timed out")
+                    if attempt < max_retries - 1:
+                        time.sleep(5)
+                        continue
+                
+                break
+
+            print("❌ All AI generation attempts failed")
             return None
 
-    # -------------------- LAYER 2: ENHANCED RULE-BASED FALLBACK --------------------
+        except Exception as e:
+            print(f"❌ API generation failed: {e}")
+            logger.error(f"API generation failed: {e}")
+            return None
+
+    def _clean_docstring(self, docstring: str) -> str:
+        if not docstring:
+            return ""
+        if '"""' in docstring:
+            parts = docstring.split('"""')
+            if len(parts) >= 3:
+                docstring = '"""' + parts[1] + '"""'
+        if not docstring.startswith('"""'):
+            docstring = f'"""{docstring}'
+        if not docstring.endswith('"""'):
+            docstring = f'{docstring}"""'
+        return docstring
+
+    # -------------------- RULE-BASED FALLBACKS --------------------
     def _generate_rule_based_doc(self, function_code: str, function_name: str) -> str:
-        """Fallback rule-based amélioré"""
-        # [Garder votre implémentation existante]
-        # ... votre code actuel ...
+        try:
+            lines = function_code.strip().split('\n')
+            if not lines:
+                return '"""\nTODO: Add documentation\n"""'
+            signature = lines[0]
+            params = []
+            if '(' in signature and ')' in signature:
+                param_part = signature.split('(', 1)[1].rsplit(')', 1)[0]
+                param_list = [p.strip() for p in param_part.split(',') if p.strip()]
+                for param in param_list:
+                    param_name = param.split('=')[0].strip() if '=' in param else param.strip()
+                    if param_name and not param_name.startswith('*'):
+                        params.append(param_name)
+            
+            doc_lines = ['"""', f"{function_name} function.", ""]
+            if params:
+                doc_lines.append("Args:")
+                for param in params:
+                    doc_lines.append(f"    {param}: Description of {param}.")
+                doc_lines.append("")
+            
+            return_type = "Any"
+            if "->" in signature:
+                return_part = signature.split("->")[1].strip()
+                return_type = return_part.split(":")[0].strip() if ":" in return_part else return_part
+            doc_lines.append("Returns:")
+            doc_lines.append(f"    {return_type}: Description of return value.")
+            doc_lines.append('"""')
+            return '\n'.join(doc_lines)
+        except Exception:
+            return '"""\nTODO: Add comprehensive documentation\n"""'
 
     def _generate_rule_based_test(self, function_code: str, function_name: str) -> str:
-        """Fallback rule-based pour les tests"""
-        # [Garder votre implémentation existante]
-        # ... votre code actuel ...
+        try:
+            signature = function_code.strip().split('\n')[0]
+            params = []
+            if '(' in signature and ')' in signature:
+                param_part = signature.split('(', 1)[1].rsplit(')', 1)[0]
+                params = [p.strip().split('=')[0].strip() for p in param_part.split(',') if p.strip()]
+            
+            test_code = ["import pytest", "", f"def test_{function_name}():"]
+
+            if params:
+                test_values = []
+                for param in params:
+                    if param in ['a', 'x', 'num1']:
+                        test_values.append('5')
+                    elif param in ['b', 'y', 'num2']:
+                        test_values.append('3')
+                    elif 'list' in param or 'array' in param:
+                        test_values.append('[1, 2, 3]')
+                    elif 'string' in param or 'str' in param or 'text' in param:
+                        test_values.append('"test"')
+                    else:
+                        test_values.append('None')
+                test_code.append(f"    # Test with {', '.join(test_values)}")
+                test_code.append(f"    result = {function_name}({', '.join(test_values)})")
+                test_code.append("    assert result is not None")
+            else:
+                test_code.append(f"    result = {function_name}()")
+                test_code.append("    assert result is not None")
+            test_code.append("")
+            return '\n'.join(test_code)
+        except Exception:
+            return f'''import pytest
+
+def test_{function_name}():
+    # Test basic functionality
+    # TODO: Add specific test cases
+    pass
+'''
 
     # -------------------- MAIN INTERFACE --------------------
     def generate_documentation(self, function_code: str, function_name: str) -> str:
-        print(f"🔍 generate_documentation called for: {function_name}")
-        
-        # Essayer d'abord le modèle fine-tuné
-        ai_result = self._generate_with_fine_tuned_ai(function_code, function_name, mode="doc")
-        if ai_result and self._is_ai_output_valid(ai_result, mode="doc"):
-            print("✅ Using our fine-tuned model!")
-            return f"\"\"\"\n{ai_result}\n\"\"\""
-        
-        # Fallback vers le système rule-based
-        print("📋 Using rule-based fallback for documentation")
+        print(f"🔍 Attempting AI documentation generation for: {function_name}")
+        ai_result = self._generate_with_api(function_code, "doc")
+        if ai_result and self._is_valid_output(ai_result, "doc"):
+            print(f"✅ USING AI MODEL for: {function_name}")
+            return self._clean_docstring(ai_result)
+        print(f"🔄 FALLING BACK to rule-based for: {function_name}")
         return self._generate_rule_based_doc(function_code, function_name)
 
     def generate_test(self, function_code: str, function_name: str) -> str:
-        print(f"🔍 generate_test called for: {function_name}")
-        
-        # Essayer d'abord le modèle fine-tuné
-        ai_result = self._generate_with_fine_tuned_ai(function_code, function_name, mode="test")
-        if ai_result and self._is_ai_output_valid(ai_result, mode="test"):
-            print("✅ Using our fine-tuned model!")
+        print(f"🔍 Attempting AI test generation for: {function_name}")
+        ai_result = self._generate_with_api(function_code, "test")
+        if ai_result and self._is_valid_output(ai_result, "test"):
+            print(f"✅ USING AI MODEL for: {function_name}")
             return ai_result
-        
-        # Fallback vers le système rule-based
-        print("📋 Using rule-based fallback for test")
+        print(f"🔄 FALLING BACK to rule-based for: {function_name}")
         return self._generate_rule_based_test(function_code, function_name)
 
-    # -------------------- NEW: REFACTORING FEATURE --------------------
-    def refactor_code(self, code: str, language: str = "python") -> str:
-        """
-        Suggest code refactoring improvements
-        """
-        if self.model is None or self.tokenizer is None:
-            return "# Refactoring requires AI model (currently unavailable)"
-        
-        try:
-            prompt = f"""### Task: Refactor this {language} code to make it more efficient, readable, and Pythonic
-### Code to refactor:
-{code}
-
-### Refactored code (code only, no explanations):
-"""
-            
-            inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-            device = next(self.model.parameters()).device
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            
-            with torch.inference_mode():
-                out = self.model.generate(
-                    **inputs,
-                    max_new_tokens=500,
-                    do_sample=True,
-                    temperature=0.4,
-                    top_p=0.9,
-                    eos_token_id=self.tokenizer.eos_token_id
-                )
-            
-            text = self.tokenizer.decode(out[0], skip_special_tokens=True)
-            refactored_code = text[len(prompt):].strip()
-            
-            # Extraire seulement le code
-            if "```" in refactored_code:
-                refactored_code = refactored_code.split("```")[1]
-                if refactored_code.startswith("python"):
-                    refactored_code = refactored_code[6:].strip()
-            
-            return refactored_code
-            
-        except Exception as e:
-            print(f"🤖 Refactoring failed: {e}")
-            return f"# Refactoring failed: {str(e)}"
-
-    # -------------------- NEW: CODE EXPLANATION --------------------
-    def explain_code(self, code: str, language: str = "python") -> str:
-        """
-        Explain code in natural language
-        """
-        if self.model is None or self.tokenizer is None:
-            return "Code explanation requires AI model (currently unavailable)"
-        
-        try:
-            prompt = f"""### Task: Explain this {language} code in simple natural language
-### Code:
-{code}
-
-### Explanation (clear and concise):
-"""
-            
-            inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-            device = next(self.model.parameters()).device
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            
-            with torch.inference_mode():
-                out = self.model.generate(
-                    **inputs,
-                    max_new_tokens=200,
-                    do_sample=True,
-                    temperature=0.3,
-                    top_p=0.9,
-                    eos_token_id=self.tokenizer.eos_token_id
-                )
-            
-            text = self.tokenizer.decode(out[0], skip_special_tokens=True)
-            explanation = text[len(prompt):].strip()
-            
-            return explanation
-            
-        except Exception as e:
-            print(f"🤖 Code explanation failed: {e}")
-            return f"Explanation failed: {str(e)}"
-
-    # -------------------- VALIDATION UTILITIES --------------------
-    def _is_ai_output_valid(self, output: str, mode: str = "doc") -> bool:
-        """
-        Valide la sortie de l'IA
-        """
+    def _is_valid_output(self, output: str, mode: str) -> bool:
         if not output or len(output.strip()) < 10:
             return False
-            
         if mode == "doc":
-            # Pour docstrings: vérifier que ça ressemble à de la documentation
-            has_doc_keywords = any(word in output.lower() for word in [
-                'function', 'param', 'arg', 'return', 'description', 'example'
-            ])
-            return has_doc_keywords or len(output.split('\n')) >= 2
-            
-        else:  # mode == "test"
-            # Pour tests: vérifier que ça ressemble à du code de test
-            has_test_keywords = any(word in output.lower() for word in [
-                'test', 'assert', 'import', 'def test_', 'pytest'
-            ])
-            return has_test_keywords or 'assert' in output
+            return any(k in output.lower() for k in ['args', 'returns', 'param', 'function', 'description', '"""'])
+        else:
+            return any(k in output.lower() for k in ['def test', 'assert', 'import pytest', 'import unittest'])
 
 # Create global instance
 ai_service = AIService()
